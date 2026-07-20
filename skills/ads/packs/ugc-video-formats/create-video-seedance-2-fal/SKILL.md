@@ -1,6 +1,6 @@
 ---
 name: create-video-seedance-2-fal
-description: Generate a single 4-15s vertical video clip with ByteDance Seedance 2.0 reference-to-video via fal.ai. Multi-image reference (avatar + product + setting), native lip-synced VO + ambient audio via `generate_audio: true`, internal multi-cut handling within one render. The default clip atom for AI-creator UGC ads built on the NB2 + Seedance architecture. Validated on `beauty-by-earth/video-01`.
+description: Generate a single 4-15s vertical video clip with ByteDance Seedance 2.0 reference-to-video via fal.ai. Multi-image reference (avatar + product + setting), native lip-synced VO + ambient audio (generate-audio on by default), internal multi-cut handling within one render. Routes through the GooseWorks FAL proxy (bills the Ads agent). The default clip atom for AI-creator UGC ads built on the NB2 + Seedance architecture. Validated on beauty-by-earth/video-01.
 owner: team
 status: active
 version: 1
@@ -36,18 +36,17 @@ Use this atom when:
 Required:
 - `--prompt` — structured prompt block (see "Prompt template" below). Long, multi-block. Reference run example: `beauty-by-earth/video-01-three-product-grwm/working/fire_seedance_facewash.py`.
 - `--output` — local MP4 destination.
-- `--image-ref` — at least one reference image (repeatable). The atom uploads each and passes as `image_urls`. Order matters — first ref = `@Image1` in prompt addressing.
+- `--image-url` (alias `--image-ref`) — at least one **PUBLIC** reference image URL (repeatable), passed as `image_urls`. Order matters — first = `@Image1` in prompt addressing. The proxy does NOT upload local files: host local refs via MCP `get_upload_url` → `get_download_url` and pass the URL (identical to `create-video-fal`).
 
 Optional:
 - `--resolution` — `480p` | `720p` | `1080p` (default). 1080p meaningfully better for product label fidelity.
-- `--duration` — `4`–`15` seconds (default `15`). Passed as **string** per FAL schema.
+- `--duration` — `4`–`15` seconds (default `15`). Passed as an **int** (`seedance-2.0/reference-to-video` enum {auto,4..15}); a string 400s with `invalid_request` (validated 2026-07-18).
 - `--aspect-ratio` — `9:16` (default), `16:9`, `1:1`, etc.
 - `--generate-audio` — bool, default true. Set false for silent B-roll where VO is added post.
 - `--seed` — integer for deterministic re-runs (FAL returns a seed; pass it back to reproduce).
-- `--with-logs` — stream FAL queue updates to stdout.
 
 Credentials:
-- `FAL_API_KEY` (or `FAL_KEY`) in `.env`.
+- **No FAL key.** Routes through the GooseWorks FAL proxy (`media_proxy.py`, bundled) and bills the Ads agent, using `~/.gooseworks/credentials.json` (written by the `gooseworks` CLI). Your `cal_`/agent token is not a FAL key — the old direct-key path 401'd; that's why this capability was rerouted through the proxy.
 
 ## Decision Rules
 
@@ -88,7 +87,7 @@ For confessional / single-sitting UGC, wardrobe should be IDENTICAL across all c
 
 **2. NSFW reject → STOP and surface, do not auto-retry.** Body-application + female + water/lather hits the classifier reliably. If FAL returns `content_policy_violation` or `status: failed` with `nsfw` reason, do NOT retry the same prompt. Surface to the caller with 3 options: rewrite the application beat as smell-test / fingertips-show, reframe as POV (no face), or skip the scene. Follows the project-wide moderation policy (see memory `feedback_hf_moderation_surface.md`).
 
-**3. `duration` as string.** Pass `"15"`, not `15`. FAL schema accepts string only.
+**3. `duration` as an INT.** Pass `15`, not `"15"`. `seedance-2.0/reference-to-video` rejects a string duration with `invalid_request` (validated 2026-07-18; the old "string only" note was the deprecated v1 i2v endpoint).
 
 **4. Single product per call (except hook).** Multi-product hero scenes within a single Seedance call degrade label fidelity. The exception is the hook/intro scene where all products appear together but no single label is hero.
 
@@ -97,11 +96,11 @@ For confessional / single-sitting UGC, wardrobe should be IDENTICAL across all c
 ## Workflow
 
 ```bash
-python3 coworkers/video/atoms/video-generation/create-video-seedance-2-fal/scripts/generate.py \
+python3 scripts/generate.py \
   --prompt "$(cat prompt-scene-1.txt)" \
   --output /path/to/scene-1.mp4 \
-  --image-ref /path/to/portrait.png \
-  --image-ref /path/to/product.png \
+  --image-url "https://<hosted>/portrait.png" \
+  --image-url "https://<hosted>/product.png" \
   --resolution 1080p \
   --duration 15 \
   --aspect-ratio 9:16 \
@@ -109,15 +108,15 @@ python3 coworkers/video/atoms/video-generation/create-video-seedance-2-fal/scrip
 ```
 
 The script:
-1. Loads FAL key via shared `fal_helpers.load_fal_key()`.
-2. Uploads each `--image-ref` to FAL storage (returns `https://v3.fal.media/...` URLs).
-3. Calls `fal_client.subscribe("bytedance/seedance-2.0/reference-to-video", arguments={...})` with:
+1. Routes through the bundled `media_proxy.py` (GooseWorks FAL proxy) — no FAL key; bills the Ads agent via `~/.gooseworks/credentials.json`.
+2. Passes the `--image-url` values straight through as `image_urls` (they must already be PUBLIC URLs; the orchestrator hosts local refs via MCP).
+3. Submits `bytedance/seedance-2.0/reference-to-video` through the proxy and polls to completion with:
    ```python
    {
        "prompt": <prompt>,
        "image_urls": [<refs>],
        "resolution": <res>,
-       "duration": "<dur>",  # string
+       "duration": <dur>,  # int
        "aspect_ratio": <ar>,
        "generate_audio": <bool>,
        "seed": <optional int>,
@@ -216,7 +215,7 @@ Full template reference: `prompt-example.md` at the repo root, plus all four scr
 | FAL 422 `content_policy_violation: partner_validation_failed` | AI-gen scene passed as `video_urls` | Remove `video_urls`. Use `image_urls` only for identity continuity. |
 | FAL response `status: failed`, `nsfw` reason | Body-application + female + water/lather hit classifier | STOP. Surface to caller. Rewrite sidestep beat as smell-test or fingertips-show. NEVER auto-retry. |
 | FAL 404 on endpoint path | Wrong endpoint slug | Use `bytedance/seedance-2.0/reference-to-video` exactly — no `fal-ai/` prefix. |
-| Output longer than requested | `duration` sent as int not string | Send as string: `"duration": "15"`. |
+| `invalid_request` on submit | `duration` sent as a **string** | Send an **int**: `"duration": 15` (enum {auto,4..15}). |
 | Product label garbled / wrong | Multi-image refs drifted, or 720p | Move to 1080p, ensure product ref is sharp + correctly cropped, add "label MUST be sharp and clearly readable" to the hero sub-scene. |
 | Mouth moving when not speaking | Default Seedance behavior | Add to Global Rules: "Lips remain CLOSED between dialogue beats — no mouth movement when not speaking." |
 | Cinematic slow pacing despite "iPhone selfie" prompt | Seedance prior leans cinematic | Strengthen anti-pattern block: "Casual real-time pace, NOT slow-motion, NOT dolly moves, NOT cinematic." Optionally post-process with `ffmpeg setpts=0.66*PTS` for 1.5x speed. |
